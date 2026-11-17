@@ -1,37 +1,255 @@
-# Architecture and product decisions
+# Ajaia Docs — Architecture and Product Decisions
 
-## Goal
-Ship a coherent vertical slice: create → edit → persist → share → reopen. The priority is a reliable end-to-end flow, not visual parity with Google Docs.
+## 1. Project Goal
 
-## System
-- **Client:** dependency-free HTML/CSS/JavaScript SPA, served by the same Node process as the API. The browser's `contenteditable` element provides editing; toolbar actions use `execCommand`.
-- **API:** Node `http` server with JSON endpoints under `/api`, 1 MB request-body limit, title and content-size validation, and explicit 401/403/404 responses.
-- **Persistence:** built-in SQLite via `node:sqlite`, three tables (`users`, `documents`, `shares`), with foreign keys and cascading share deletion.
-- **Authorization:** every document read checks ownership or a share grant; every edit/delete/share/revoke operation checks ownership. No reliance on hidden UI controls.
-- **User simulation:** `X-Demo-User` header selects one of two seeded users. This is not authentication and is a deliberate, disclosed demo-only compromise.
-- **Content:** rich-text HTML is saved; the server removes attributes and tags outside a small allowlist. File imports are HTML-escaped and converted to paragraphs.
+Build a lightweight, Google Docs-inspired document workspace that supports the complete workflow:
 
-## API contract
+**Create → Edit → Autosave → Persist → Share → Reopen**
+
+The priority is a reliable, functional full-stack application rather than reproducing every feature of Google Docs.
+
+## 2. System Architecture
+
+```text
+Browser (HTML, CSS, JavaScript)
+              |
+              | HTTP / JSON
+              v
+      Node.js HTTP Server
+           server.js
+              |
+              | Validation and Access Control
+              v
+        Database Layer
+              |
+       +------+------+
+       |             |
+       v             v
+  Local SQLite   Turso Database
+    db.js         db-turso.js
+       |             |
+       v             v
+ better-sqlite3   @libsql/client
+ Development       Production
+                       |
+                    Render
+```
+
+### Frontend
+
+The frontend uses HTML, CSS, and vanilla JavaScript.
+
+Key responsibilities include:
+
+- Document dashboard and navigation
+- Rich-text editing using `contenteditable`
+- Formatting through browser `execCommand`
+- Debounced autosaving
+- File import
+- Document search and filtering
+- Sharing interface
+- Demonstration user switching
+
+The frontend is served by the same Node.js application that provides the API.
+
+### Backend
+
+The backend is implemented using Node.js and its built-in HTTP server.
+
+`server.js` handles:
+
+- Static frontend delivery
+- REST-style JSON API endpoints
+- Request validation
+- Document creation, retrieval, updating, and deletion
+- Sharing and access revocation
+- Owner and viewer permissions
+- Error responses
+
+Requests are limited to 1 MB. Document titles and content sizes are validated before saving.
+
+### Database
+
+The application supports two database configurations.
+
+**Local Development**
+
+- SQLite through `better-sqlite3`
+- Database implementation: `db.js`
+- Database stored locally
+- No external database credentials required
+
+**Production**
+
+- Turso hosted SQLite database
+- Database implementation: `db-turso.js`
+- Connection through `@libsql/client`
+- Database URL and authentication token configured using environment variables
+- Persistent document storage independent of Render's application filesystem
+
+The server selects Turso when `TURSO_DATABASE_URL` is configured. Otherwise, it uses local SQLite.
+
+### Database Schema
+
+The application uses three tables:
+
+| Table | Purpose |
+|---|---|
+| `users` | Stores demonstration users |
+| `documents` | Stores document ownership, titles, HTML content, and timestamps |
+| `shares` | Stores document access grants |
+
+The `shares` table connects documents to users who have permission to view them.
+
+## 3. API Design
+
 | Method | Endpoint | Purpose |
 |---|---|---|
-| GET | `/api/users` | List demo users |
-| GET | `/api/documents` | List owned and shared documents |
-| POST | `/api/documents` | Create document |
-| GET | `/api/documents/:id` | Read if owner or shared |
-| PUT | `/api/documents/:id` | Owner updates title/content |
-| DELETE | `/api/documents/:id` | Owner deletes |
-| POST | `/api/documents/:id/share` | Owner grants viewer access |
-| POST | `/api/documents/:id/unshare` | Owner revokes access |
+| GET | `/api/users` | Retrieve demonstration users |
+| GET | `/api/documents` | List accessible documents |
+| POST | `/api/documents` | Create a document |
+| GET | `/api/documents/:id` | Open an accessible document |
+| PUT | `/api/documents/:id` | Update an owned document |
+| DELETE | `/api/documents/:id` | Delete an owned document |
+| POST | `/api/documents/:id/share` | Grant viewer access |
+| POST | `/api/documents/:id/unshare` | Revoke viewer access |
 
-## Tradeoffs
-1. **Dependency-free implementation instead of React/Tiptap:** faster offline build, simpler reviewer setup; costs some editing robustness and future extensibility.
-2. **SQLite instead of managed Postgres:** zero setup and durable local storage; requires a persistent volume in deployment.
-3. **Debounced autosave instead of explicit Save:** improves usability; a browser crash during the debounce window may lose the last keystrokes.
-4. **Viewer-only sharing:** demonstrates access-control logic without introducing edit conflicts.
-5. **Text/Markdown import only:** provides a useful import flow without complex DOCX parsing; Markdown is not rendered.
+## 4. Authorization Model
 
-## Security boundaries
-Backend ownership checks are enforced, but the demo identity header is spoofable. The application must not be treated as secure multi-tenant production software. Production would require authenticated sessions, CSRF protections where appropriate, a mature HTML sanitizer, auditing, and robust authorization tests.
+Two demonstration users are available:
 
-## Testing and verification
-`npm test` validates access isolation and sharing. Manual browser checks should verify toolbar formatting, import, autosave, refresh, and sharing. No claims of production security or real-time co-editing are made.
+- Alex Morgan (`alex`)
+- Sam Rivera (`sam`)
+
+The selected identity is sent to the backend using the `X-Demo-User` request header.
+
+The backend checks:
+
+- Whether a user owns a document
+- Whether a user has been granted access to read it
+- Whether the user is authorized to edit, delete, share, or revoke access
+
+Document owners have editing permissions. Shared recipients have read-only permissions.
+
+**Important:** The demonstration identity header is not secure authentication. It can be spoofed and is intended only for the engineering demonstration.
+
+## 5. Document Persistence and Autosaving
+
+The editor automatically saves changes after approximately 650 milliseconds of inactivity.
+
+Document content is stored as HTML in the database.
+
+The production application uses Turso so documents remain stored independently of Render service restarts and redeployments.
+
+Autosaving reduces manual interaction, but abrupt browser termination before a pending save completes may result in lost changes.
+
+## 6. Deployment Architecture
+
+**Frontend and Backend:** Render Web Service
+
+**Database:** Turso hosted SQLite
+
+**Source Control:** GitHub
+
+Deployment flow:
+
+```text
+Developer
+    |
+    v
+GitHub Repository
+    |
+    v
+Render Build and Deployment
+    |
+    v
+Node.js Application
+    |
+    v
+Turso Hosted Database
+```
+
+Live application:
+
+https://ajaia-docs-iq6c.onrender.com
+
+GitHub repository:
+
+https://github.com/shreyashisandhiri/ajaia-docs
+
+## 7. Technical Tradeoffs
+
+### Vanilla JavaScript Instead of React
+
+Using vanilla JavaScript reduced setup complexity and allowed rapid development.
+
+A production editor could benefit from React and a structured editor such as Tiptap or ProseMirror.
+
+### SQLite and Turso Instead of PostgreSQL
+
+SQLite simplified local development. Turso provides a hosted SQLite-compatible database suitable for this demonstration.
+
+### Debounced Autosave
+
+Autosaving improves usability but introduces a short interval in which unsaved changes may be lost.
+
+### Read-Only Sharing
+
+Read-only sharing demonstrates backend permission enforcement without requiring concurrent editing or conflict resolution.
+
+### Limited File Import
+
+TXT and Markdown files are supported as text imports. DOCX and PDF parsing were excluded to keep the implementation focused.
+
+## 8. Security Considerations
+
+The backend performs ownership checks and validates incoming document data.
+
+HTML content is restricted to a small set of permitted tags, and unsupported attributes are removed.
+
+However, this is not a production-grade security implementation.
+
+Production improvements would include:
+
+- Real authentication and authenticated sessions
+- Stronger HTML sanitization
+- CSRF protection where applicable
+- Auditing and monitoring
+- Additional authorization and integration tests
+
+The application should not be used for sensitive information.
+
+## 9. Testing and Verification
+
+Automated tests run using:
+
+```bash
+npm test
+```
+
+Three tests verify:
+
+- Document ownership and editing permissions
+- Read-only sharing and unauthorized access restrictions
+- Rejection of invalid sharing recipients
+
+The live application was also manually verified for:
+
+- Document creation
+- Editing and autosaving
+- Reopening after browser refresh
+- Sharing between demonstration users
+- Read-only access for shared documents
+
+The automated tests primarily cover the local SQLite implementation. Production database behavior was verified through manual browser testing.
+
+## 10. Future Improvements
+
+- Real user authentication
+- Real-time collaborative editing
+- Document revision history
+- Conflict detection
+- DOCX and PDF import
+- Automated end-to-end browser tests
+- Improved observability and error reporting
+- Production-grade security controls
